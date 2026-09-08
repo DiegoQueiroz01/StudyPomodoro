@@ -15,15 +15,21 @@ class PhaseType(Enum):
 
 
 class PomodoroSession:
-    """Gerencia a transição de ciclos e contagem de tempo do Pomodoro."""
+    """Gerencia os ciclos de estudo e mantém os participantes do canal atualizados em tempo real."""
 
     def __init__(
         self,
+        voice_channel_id: int,
+        initial_participants: list,
         work_minutes: int = 25,
         short_break_minutes: int = 5,
         long_break_minutes: int = 15,
         cycles_before_long_break: int = 4,
     ):
+        self.voice_channel_id = voice_channel_id
+        # Usamos um conjunto (set) para evitar duplicatas de IDs de usuários
+        self.participants = set(initial_participants)
+        
         self.work_seconds = work_minutes * 60
         self.short_break_seconds = short_break_minutes * 60
         self.long_break_seconds = long_break_minutes * 60
@@ -34,31 +40,33 @@ class PomodoroSession:
         self.phase = PhaseType.WORK
         self.remaining_seconds = self.work_seconds
 
+    def add_participant(self, user_id: int):
+        """Adiciona um estudante que entrou na sala."""
+        self.participants.add(user_id)
+
+    def remove_participant(self, user_id: int):
+        """Remove um estudante que saiu da sala."""
+        self.participants.discard(user_id)
+
     def start(self):
-        """Inicia a sessão."""
         self.status = PomodoroStatus.RUNNING
 
     def pause(self):
-        """Pausa o temporizador."""
         if self.status == PomodoroStatus.RUNNING:
             self.status = PomodoroStatus.PAUSED
 
     def resume(self):
-        """Retoma a sessão."""
         if self.status == PomodoroStatus.PAUSED:
             self.status = PomodoroStatus.RUNNING
 
     def stop(self):
-        """Reseta o estado completo da sessão."""
         self.status = PomodoroStatus.STOPPED
         self.current_cycle = 1
         self.phase = PhaseType.WORK
         self.remaining_seconds = self.work_seconds
 
     def next_phase(self) -> PhaseType:
-        """Calcula e alterna para a próxima fase do Pomodoro."""
         if self.phase == PhaseType.WORK:
-            # Se concluiu a quantidade de ciclos para a pausa longa
             if self.current_cycle % self.cycles_before_long_break == 0:
                 self.phase = PhaseType.LONG_BREAK
                 self.remaining_seconds = self.long_break_seconds
@@ -66,7 +74,6 @@ class PomodoroSession:
                 self.phase = PhaseType.SHORT_BREAK
                 self.remaining_seconds = self.short_break_seconds
         else:
-            # Saindo de uma pausa (curta ou longa) e voltando ao foco
             self.phase = PhaseType.WORK
             self.remaining_seconds = self.work_seconds
             self.current_cycle += 1
@@ -74,7 +81,6 @@ class PomodoroSession:
         return self.phase
 
     def format_time(self) -> str:
-        """Formata os segundos em MM:SS."""
         minutes = self.remaining_seconds // 60
         seconds = self.remaining_seconds % 60
         return f"{minutes:02d}:{seconds:02d}"
