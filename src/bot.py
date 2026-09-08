@@ -10,6 +10,7 @@ from dotenv import load_dotenv
 sys.path.append(str(Path(__file__).parent))
 
 from services.pomodoro_service import PomodoroSession, PomodoroStatus, PhaseType
+from services.database_service import DatabaseService
 
 load_dotenv()
 TOKEN = os.getenv("DISCORD_TOKEN")
@@ -19,9 +20,10 @@ if not TOKEN:
 
 intents = discord.Intents.default()
 intents.members = True
-intents.voice_states = True  # Permite escutar entradas/saídas do canal de voz
+intents.voice_states = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
+db = DatabaseService()  # Inicializa o serviço do banco de dados
 sessions = {}
 
 
@@ -37,33 +39,27 @@ async def on_ready():
     print("========================================")
 
 
-# EVENTO: Escuta quando alguém entra, sai ou troca de canal de voz
 @bot.event
 async def on_voice_state_update(
     member: discord.Member, before: discord.VoiceState, after: discord.VoiceState
 ):
     if member.bot:
-        return  # Ignora outros bots
+        return
 
     guild_id = member.guild.id
 
-    # Se não há sessão ativa neste servidor, não precisamos fazer nada
-    if guild_id not in sessions or sessions[guild_id].status != PomodoroStatus.RUNNING:
+    if guild_id not in sessions or sessions[guild_id].status == PomodoroStatus.STOPPED:
         return
 
     session = sessions[guild_id]
 
-    # Caso 1: O usuário ENTROU no canal onde o Pomodoro está rodando
     if after.channel and after.channel.id == session.voice_channel_id:
         if before.channel is None or before.channel.id != session.voice_channel_id:
             session.add_participant(member.id)
-            print(f"[VOZ] {member.display_name} entrou na sessão do canal {after.channel.name}")
 
-    # Caso 2: O usuário SAIU do canal onde o Pomodoro está rodando
     elif before.channel and before.channel.id == session.voice_channel_id:
         if after.channel is None or after.channel.id != session.voice_channel_id:
             session.remove_participant(member.id)
-            print(f"[VOZ] {member.display_name} saiu da sessão do canal {before.channel.name}")
 
 
 @bot.tree.command(name="ping", description="Responde com Pong! e a latência do bot.")
@@ -74,10 +70,7 @@ async def ping(interaction: discord.Interaction):
     )
 
 
-@bot.tree.command(
-    name="pomodoro_iniciar",
-    description="Inicia uma sessão Pomodoro no seu canal de voz.",
-)
+@bot.tree.command(name="pomodoro_iniciar", description="Inicia uma sessão Pomodoro no seu canal de voz.")
 @app_commands.describe(
     foco="Tempo de foco em minutos (padrão: 25)",
     pausa_curta="Tempo de pausa curta em minutos (padrão: 5)",
@@ -99,9 +92,9 @@ async def pomodoro_iniciar(
         )
         return
 
-    if guild_id in sessions and sessions[guild_id].status == PomodoroStatus.RUNNING:
+    if guild_id in sessions and sessions[guild_id].status != PomodoroStatus.STOPPED:
         await interaction.response.send_message(
-            "⚠️ Já existe uma sessão Pomodoro em andamento neste servidor!",
+            "⚠️ Já existe uma sessão Pomodoro ativa ou pausada neste servidor!",
             ephemeral=True,
         )
         return
@@ -133,15 +126,29 @@ async def pomodoro_iniciar(
 
     channel = interaction.channel
 
-    while session.status == PomodoroStatus.RUNNING:
-        while session.remaining_seconds > 0 and session.status == PomodoroStatus.RUNNING:
+    while session.status != PomodoroStatus.STOPPED:
+        if session.status == PomodoroStatus.RUNNING and session.remaining_seconds > 0:
             await asyncio.sleep(1)
-            session.remaining_seconds -= 1
+            if session.status == PomodoroStatus.RUNNING:
+                session.remaining_seconds -= 1
+        elif session.status == PomodoroStatus.PAUSED:
+            await asyncio.sleep(1)
+            continue
 
+        # Transição de fase
         if session.status == PomodoroStatus.RUNNING and session.remaining_seconds == 0:
-            nova_fase = session.next_phase()
+            current_phase = session.phase
+            
+            # SE A FASE QUE ACABOU DE TERMINAR FOI DE FOCO: Salva os minutos no SQLite
+            if current_phase == PhaseType.WORK:
+                for participant_id in session.participants:
+                    db.record_focus_session(
+                        user_id=participant_id,
+                        guild_id=guild_id,
+                        minutes_studied=foco,
+                    )
 
-            # Gera as menções atualizadas dos membros que estão no canal
+            nova_fase = session.next_phase()
             current_mentions = [f"<@{uid}>" for uid in session.participants]
             mentions_text = " ".join(current_mentions) if current_mentions else ""
 
@@ -153,18 +160,90 @@ async def pomodoro_iniciar(
             elif nova_fase == PhaseType.SHORT_BREAK:
                 msg = (
                     f"☕ **Hora da pausa em {voice_channel.mention}!** {mentions_text}\n"
+                    f"💾 *Tempo salvo no histórico de estudos dos participantes!*\n"
                     f"🌴 **Pausa Curta iniciada** | Duração: `{pausa_curta}` min."
                 )
             else:
                 msg = (
                     f"🎉 **Parabéns pelos 4 ciclos no canal {voice_channel.mention}!** {mentions_text}\n"
+                    f"💾 *Tempo salvo no histórico de estudos dos participantes!*\n"
                     f"🛌 **Pausa Longa iniciada** | Duração: `{pausa_longa}` min."
                 )
 
             await channel.send(msg)
 
 
-@bot.tree.command(name="pomodoro_parar", description="Cancela a sessão Pomodoro atual.")
+@bot.tree.command(name="pomodoro_pausar", description="Pausa temporariamente o cronômetro do Pomodoro.")
+async def pomodoro_pausar(interaction: discord.Interaction):
+    guild_id = interaction.guild_id
+
+    if guild_id not in sessions or sessions[guild_id].status != PomodoroStatus.RUNNING:
+        await interaction.response.send_message(
+            "⚠️ Não há nenhuma sessão em andamento para pausar.", ephemeral=True
+        )
+        return
+
+    sessions[guild_id].pause()
+    await interaction.response.send_message("⏸️ **Sessão Pomodoro pausada!**")
+
+
+@bot.tree.command(name="pomodoro_continuar", description="Retoma o cronômetro do Pomodoro pausado.")
+async def pomodoro_continuar(interaction: discord.Interaction):
+    guild_id = interaction.guild_id
+
+    if guild_id not in sessions or sessions[guild_id].status != PomodoroStatus.PAUSED:
+        await interaction.response.send_message(
+            "⚠️ A sessão atual não está pausada.", ephemeral=True
+        )
+        return
+
+    sessions[guild_id].resume()
+    await interaction.response.send_message("▶️ **Sessão Pomodoro retomada!**")
+
+
+@bot.tree.command(name="pomodoro_status", description="Exibe o status e tempo restante da sessão atual.")
+async def pomodoro_status(interaction: discord.Interaction):
+    guild_id = interaction.guild_id
+
+    if guild_id not in sessions or sessions[guild_id].status == PomodoroStatus.STOPPED:
+        await interaction.response.send_message(
+            "❌ Nenhuma sessão Pomodoro está ativa neste servidor.", ephemeral=True
+        )
+        return
+
+    session = sessions[guild_id]
+    mentions = [f"<@{uid}>" for uid in session.participants]
+    participants_text = ", ".join(mentions) if mentions else "Nenhum participante no momento."
+
+    status_emoji = "▶️" if session.status == PomodoroStatus.RUNNING else "⏸️"
+
+    await interaction.response.send_message(
+        f"📊 **Status do Pomodoro**\n"
+        f"• **Estado:** {status_emoji} `{session.status.value}`\n"
+        f"• **Fase Atual:** `{session.phase.value}`\n"
+        f"• **Ciclo:** `{session.current_cycle}`\n"
+        f"• **Tempo Restante:** `{session.format_time()}`\n"
+        f"• **Participantes Ativos ({len(session.participants)}):** {participants_text}"
+    )
+
+
+@bot.tree.command(name="perfil", description="Exibe suas estatísticas acumuladas de estudo.")
+async def perfil(interaction: discord.Interaction):
+    user_stats = db.get_user_stats(interaction.user.id)
+    minutes = user_stats["minutes"]
+    cycles = user_stats["cycles"]
+
+    hours = minutes // 60
+    remaining_mins = minutes % 60
+
+    await interaction.response.send_message(
+        f"👤 **Estatísticas de Estudo de {interaction.user.mention}**\n"
+        f"⏱️ **Tempo Total de Foco:** `{hours}h {remaining_mins}min` (`{minutes}` minutos)\n"
+        f"🍅 **Ciclos Pomodoro Concluídos:** `{cycles}` ciclos"
+    )
+
+
+@bot.tree.command(name="pomodoro_parar", description="Cancela e encerra a sessão Pomodoro atual.")
 async def pomodoro_parar(interaction: discord.Interaction):
     guild_id = interaction.guild_id
 

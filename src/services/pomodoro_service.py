@@ -3,9 +3,9 @@ from enum import Enum, auto
 
 
 class PomodoroStatus(Enum):
-    STOPPED = auto()
-    RUNNING = auto()
-    PAUSED = auto()
+    STOPPED = "Encerrado"
+    RUNNING = "Em andamento"
+    PAUSED = "Pausado"
 
 
 class PhaseType(Enum):
@@ -15,7 +15,7 @@ class PhaseType(Enum):
 
 
 class PomodoroSession:
-    """Gerencia os ciclos de estudo e mantém os participantes do canal atualizados em tempo real."""
+    """Gerencia os ciclos, participantes e o estado do temporizador do Pomodoro."""
 
     def __init__(
         self,
@@ -27,7 +27,6 @@ class PomodoroSession:
         cycles_before_long_break: int = 4,
     ):
         self.voice_channel_id = voice_channel_id
-        # Usamos um conjunto (set) para evitar duplicatas de IDs de usuários
         self.participants = set(initial_participants)
         
         self.work_seconds = work_minutes * 60
@@ -41,11 +40,9 @@ class PomodoroSession:
         self.remaining_seconds = self.work_seconds
 
     def add_participant(self, user_id: int):
-        """Adiciona um estudante que entrou na sala."""
         self.participants.add(user_id)
 
     def remove_participant(self, user_id: int):
-        """Remove um estudante que saiu da sala."""
         self.participants.discard(user_id)
 
     def start(self):
