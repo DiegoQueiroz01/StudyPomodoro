@@ -11,6 +11,7 @@ sys.path.append(str(Path(__file__).parent))
 
 from services.pomodoro_service import PomodoroSession, PomodoroStatus, PhaseType
 from services.database_service import DatabaseService
+from utils.embed_factory import EmbedFactory
 
 load_dotenv()
 TOKEN = os.getenv("DISCORD_TOKEN")
@@ -23,7 +24,7 @@ intents.members = True
 intents.voice_states = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
-db = DatabaseService()  # Inicializa o serviço do banco de dados
+db = DatabaseService()
 sessions = {}
 
 
@@ -112,18 +113,15 @@ async def pomodoro_iniciar(
     session.start()
     sessions[guild_id] = session
 
-    mentions = [f"<@{uid}>" for uid in session.participants]
-    participants_text = ", ".join(mentions) if mentions else "Nenhum participante."
-
-    await interaction.response.send_message(
-        f"🚀 **Sessão Pomodoro Iniciada!**\n"
-        f"🔊 **Canal de Voz:** {voice_channel.mention}\n"
-        f"👥 **Estudantes ({len(session.participants)}):** {participants_text}\n"
-        f"• **Fase Atual:** {session.phase.value}\n"
-        f"• **Ciclo:** `{session.current_cycle}`\n"
-        f"• **Duração:** `{session.format_time()}`"
+    embed = EmbedFactory.create_pomodoro_start_embed(
+        voice_channel_name=voice_channel.name,
+        participants=list(session.participants),
+        foco=foco,
+        pausa_curta=pausa_curta,
+        pausa_longa=pausa_longa,
     )
 
+    await interaction.response.send_message(embed=embed)
     channel = interaction.channel
 
     while session.status != PomodoroStatus.STOPPED:
@@ -135,11 +133,9 @@ async def pomodoro_iniciar(
             await asyncio.sleep(1)
             continue
 
-        # Transição de fase
         if session.status == PomodoroStatus.RUNNING and session.remaining_seconds == 0:
             current_phase = session.phase
-            
-            # SE A FASE QUE ACABOU DE TERMINAR FOI DE FOCO: Salva os minutos no SQLite
+
             if current_phase == PhaseType.WORK:
                 for participant_id in session.participants:
                     db.record_focus_session(
@@ -149,28 +145,21 @@ async def pomodoro_iniciar(
                     )
 
             nova_fase = session.next_phase()
-            current_mentions = [f"<@{uid}>" for uid in session.participants]
-            mentions_text = " ".join(current_mentions) if current_mentions else ""
+            duration = (
+                foco
+                if nova_fase == PhaseType.WORK
+                else (pausa_curta if nova_fase == PhaseType.SHORT_BREAK else pausa_longa)
+            )
 
-            if nova_fase == PhaseType.WORK:
-                msg = (
-                    f"🔔 **Hora de voltar ao foco em {voice_channel.mention}!** {mentions_text}\n"
-                    f"🎯 **Ciclo {session.current_cycle} iniciado** | Duração: `{foco}` min."
-                )
-            elif nova_fase == PhaseType.SHORT_BREAK:
-                msg = (
-                    f"☕ **Hora da pausa em {voice_channel.mention}!** {mentions_text}\n"
-                    f"💾 *Tempo salvo no histórico de estudos dos participantes!*\n"
-                    f"🌴 **Pausa Curta iniciada** | Duração: `{pausa_curta}` min."
-                )
-            else:
-                msg = (
-                    f"🎉 **Parabéns pelos 4 ciclos no canal {voice_channel.mention}!** {mentions_text}\n"
-                    f"💾 *Tempo salvo no histórico de estudos dos participantes!*\n"
-                    f"🛌 **Pausa Longa iniciada** | Duração: `{pausa_longa}` min."
-                )
+            phase_embed = EmbedFactory.create_phase_change_embed(
+                phase=nova_fase,
+                cycle=session.current_cycle,
+                duration_minutes=duration,
+                participants=list(session.participants),
+                voice_channel_name=voice_channel.name,
+            )
 
-            await channel.send(msg)
+            await channel.send(embed=phase_embed)
 
 
 @bot.tree.command(name="pomodoro_pausar", description="Pausa temporariamente o cronômetro do Pomodoro.")
@@ -212,35 +201,18 @@ async def pomodoro_status(interaction: discord.Interaction):
         return
 
     session = sessions[guild_id]
-    mentions = [f"<@{uid}>" for uid in session.participants]
-    participants_text = ", ".join(mentions) if mentions else "Nenhum participante no momento."
+    voice_channel = bot.get_channel(session.voice_channel_id)
+    channel_name = voice_channel.name if voice_channel else "Canal de Voz"
 
-    status_emoji = "▶️" if session.status == PomodoroStatus.RUNNING else "⏸️"
-
-    await interaction.response.send_message(
-        f"📊 **Status do Pomodoro**\n"
-        f"• **Estado:** {status_emoji} `{session.status.value}`\n"
-        f"• **Fase Atual:** `{session.phase.value}`\n"
-        f"• **Ciclo:** `{session.current_cycle}`\n"
-        f"• **Tempo Restante:** `{session.format_time()}`\n"
-        f"• **Participantes Ativos ({len(session.participants)}):** {participants_text}"
-    )
+    embed = EmbedFactory.create_status_embed(session, voice_channel_name=channel_name)
+    await interaction.response.send_message(embed=embed)
 
 
 @bot.tree.command(name="perfil", description="Exibe suas estatísticas acumuladas de estudo.")
 async def perfil(interaction: discord.Interaction):
     user_stats = db.get_user_stats(interaction.user.id)
-    minutes = user_stats["minutes"]
-    cycles = user_stats["cycles"]
-
-    hours = minutes // 60
-    remaining_mins = minutes % 60
-
-    await interaction.response.send_message(
-        f"👤 **Estatísticas de Estudo de {interaction.user.mention}**\n"
-        f"⏱️ **Tempo Total de Foco:** `{hours}h {remaining_mins}min` (`{minutes}` minutos)\n"
-        f"🍅 **Ciclos Pomodoro Concluídos:** `{cycles}` ciclos"
-    )
+    embed = EmbedFactory.create_profile_embed(user=interaction.user, stats=user_stats)
+    await interaction.response.send_message(embed=embed)
 
 
 @bot.tree.command(name="pomodoro_parar", description="Cancela e encerra a sessão Pomodoro atual.")
