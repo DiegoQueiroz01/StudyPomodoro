@@ -1,10 +1,18 @@
+import os
 import sqlite3
 from pathlib import Path
 
-# Define o caminho do arquivo do banco de dados na raiz do projeto
-DB_PATH = Path(__file__).parent.parent.parent / "pomodoro.db"
+# Usa o caminho do Fly.io se configurado, caso contrário usa o arquivo local padrão
+DEFAULT_DB_PATH = Path(__file__).parent.parent.parent / "pomodoro.db"
+DB_PATH = os.getenv("DB_PATH", str(DEFAULT_DB_PATH))
 
-
+class DatabaseService:
+    def __init__(self, db_path: str = DB_PATH):
+        self.db_path = Path(db_path)
+        # Garante que o diretório do volume exista
+        self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        self.init_db()
+        
 class DatabaseService:
     """Gerencia a conexão e operações no banco de dados SQLite."""
 
