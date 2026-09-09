@@ -1,0 +1,12 @@
+app = "studypomodoro"
+primary_region = "gru"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[mounts]
+  source = "pomodoro_data"
+  destination = "/app/data"
+
+[env]
+  DB_PATH = "/app/data/pomodoro.db"
