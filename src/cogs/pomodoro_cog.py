@@ -5,18 +5,18 @@ from discord import app_commands
 
 from services.pomodoro_service import PomodoroSession, PomodoroStatus, PhaseType
 from services.database_service import DatabaseService
+from services.audio_service import AudioService
 from utils.embed_factory import EmbedFactory
 
 
 class PomodoroCog(commands.Cog):
-    """Cog responsável pelo gerenciamento de sessões Pomodoro e perfil do usuário."""
+    """Cog responsável pelo gerenciamento de sessões Pomodoro, áudio e perfil do usuário."""
 
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         self.db = DatabaseService()
         self.sessions = {}
 
-    # Evento de escuta de voz isolado no Cog
     @commands.Cog.listener()
     async def on_voice_state_update(
         self, member: discord.Member, before: discord.VoiceState, after: discord.VoiceState
@@ -47,15 +47,15 @@ class PomodoroCog(commands.Cog):
 
     @app_commands.command(name="pomodoro_iniciar", description="Inicia uma sessão Pomodoro no seu canal de voz.")
     @app_commands.describe(
-        foco="Tempo de foco em minutos (padrão: 25)",
-        pausa_curta="Tempo de pausa curta em minutos (padrão: 5)",
+        foco="Tempo de foco em minutos (padrão: 50)",
+        pausa_curta="Tempo de pausa curta em minutos (padrão: 10)",
         pausa_longa="Tempo de pausa longa em minutos (padrão: 15)",
     )
     async def pomodoro_iniciar(
         self,
         interaction: discord.Interaction,
-        foco: int = 25,
-        pausa_curta: int = 5,
+        foco: int = 50,
+        pausa_curta: int = 10,
         pausa_longa: int = 15,
     ):
         guild_id = interaction.guild_id
@@ -74,6 +74,9 @@ class PomodoroCog(commands.Cog):
                 ephemeral=True,
             )
             return
+
+        # Avisa ao Discord que estamos processando (evita o erro 10062 Unknown interaction)
+        await interaction.response.defer()
 
         voice_channel = user.voice.channel
         initial_member_ids = [m.id for m in voice_channel.members if not m.bot]
@@ -96,8 +99,14 @@ class PomodoroCog(commands.Cog):
             pausa_longa=pausa_longa,
         )
 
-        await interaction.response.send_message(embed=embed)
+        await interaction.followup.send(embed=embed)
         channel = interaction.channel
+
+        # Conecta ao canal de voz e reproduz áudio
+        voice_client = await AudioService.get_or_connect_voice(voice_channel)
+        await AudioService.play_sound_then_music(
+            voice_client, "start_focus.mp3", "focus_music.mp3"
+        )
 
         while session.status != PomodoroStatus.STOPPED:
             if session.status == PomodoroStatus.RUNNING and session.remaining_seconds > 0:
@@ -126,6 +135,15 @@ class PomodoroCog(commands.Cog):
                     else (pausa_curta if nova_fase == PhaseType.SHORT_BREAK else pausa_longa)
                 )
 
+                if nova_fase == PhaseType.WORK:
+                    await AudioService.play_sound_then_music(
+                        voice_client, "start_focus.mp3", "focus_music.mp3"
+                    )
+                else:
+                    await AudioService.play_sound_then_music(
+                        voice_client, "start_break.mp3", "break_music.mp3"
+                    )
+
                 phase_embed = EmbedFactory.create_phase_change_embed(
                     phase=nova_fase,
                     cycle=session.current_cycle,
@@ -146,7 +164,10 @@ class PomodoroCog(commands.Cog):
             return
 
         self.sessions[guild_id].pause()
-        await interaction.response.send_message("⏸️ **Sessão Pomodoro pausada!**")
+        if interaction.guild.voice_client:
+            AudioService.stop_audio(interaction.guild.voice_client)
+
+        await interaction.response.send_message("⏸️ **Sessão Pomodoro e áudio pausados!**")
 
     @app_commands.command(name="pomodoro_continuar", description="Retoma o cronômetro do Pomodoro pausado.")
     async def pomodoro_continuar(self, interaction: discord.Interaction):
@@ -155,8 +176,21 @@ class PomodoroCog(commands.Cog):
             await interaction.response.send_message("⚠️ A sessão atual não está pausada.", ephemeral=True)
             return
 
-        self.sessions[guild_id].resume()
-        await interaction.response.send_message("▶️ **Sessão Pomodoro retomada!**")
+        session = self.sessions[guild_id]
+        session.resume()
+
+        if interaction.guild.voice_client:
+            voice_client = interaction.guild.voice_client
+            if session.phase == PhaseType.WORK:
+                await AudioService.play_sound_then_music(
+                    voice_client, "start_focus.mp3", "focus_music.mp3"
+                )
+            else:
+                await AudioService.play_sound_then_music(
+                    voice_client, "start_break.mp3", "break_music.mp3"
+                )
+
+        await interaction.response.send_message("▶️ **Sessão Pomodoro e áudio retomados!**")
 
     @app_commands.command(name="pomodoro_status", description="Exibe o status e tempo restante da sessão atual.")
     async def pomodoro_status(self, interaction: discord.Interaction):
@@ -190,7 +224,12 @@ class PomodoroCog(commands.Cog):
             return
 
         self.sessions[guild_id].stop()
-        await interaction.response.send_message("🛑 **Sessão Pomodoro encerrada!**")
+
+        if interaction.guild.voice_client:
+            AudioService.stop_audio(interaction.guild.voice_client)
+            await AudioService.disconnect_voice(interaction.guild)
+
+        await interaction.response.send_message("🛑 **Sessão Pomodoro encerrada e bot desconectado da voz!**")
 
 
 async def setup(bot: commands.Bot):
