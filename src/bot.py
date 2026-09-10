@@ -6,7 +6,13 @@ from pathlib import Path
 from discord.ext import commands
 from dotenv import load_dotenv
 
-sys.path.append(str(Path(__file__).parent))
+SRC_DIR = Path(__file__).parent
+ROOT_DIR = SRC_DIR.parent
+
+if str(SRC_DIR) not in sys.path:
+    sys.path.insert(0, str(SRC_DIR))
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
 
 load_dotenv()
 TOKEN = os.getenv("DISCORD_TOKEN")
@@ -27,10 +33,7 @@ class StudyBot(commands.Bot):
 
     async def setup_hook(self):
         """Método nativo invocado antes do bot conectar, ideal para carregar Cogs."""
-        # Carrega a Cog de Pomodoro
         await self.load_extension("cogs.pomodoro_cog")
-        
-        # Sincroniza a árvore de comandos Slash
         synced = await self.tree.sync()
         print(f"Comandos Slash sincronizados via Cogs: {len(synced)} comando(s)")
 
